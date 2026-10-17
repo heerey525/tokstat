@@ -11,15 +11,20 @@ const ENTRY = path.join(here, '..', 'desktop', 'plugin.js')
  * The app loads the entry uncompiled and may import only the plugin SDK, so
  * the tests evaluate the very same source with stubs instead of a bundle.
  *
- * Unlike the focusedUsage-based plugins, tokstat is event-driven: we stub
- * host.onEvent to capture the ticker/message handlers and fire them.
+ * The `usePluginI18n` stub mirrors the HOST, not the plugin: keys are resolved
+ * by walking the registered bundle on '.', falling back to `en`, then to the
+ * key itself. A flat `'label.total'` bundle therefore yields the raw key here
+ * exactly as it does in the app — that is the whole point of not hand-rolling
+ * a friendly stub.
+ *
+ * tokstat is event-driven: we stub host.onEvent to capture the ticker/message
+ * handlers and fire them.
  */
-function loadPlugin(focusKey = 's1') {
-  const source = readFile(ENTRY, 'utf8').then(async s => {
+function loadPlugin({ locale = 'en', focusKey = 's1' } = {}) {
+  return readFile(ENTRY, 'utf8').then(s => {
     const body = s
       .replace(/^import .*\n/gm, '')
       .replace('export default plugin', 'return plugin')
-    const handlers = {}
     const listeners = { 'session.usage': [], 'message.start': [], 'message.complete': [] }
     const atom = (init) => {
       let v = init
@@ -34,7 +39,6 @@ function loadPlugin(focusKey = 's1') {
         focusedStoredSessionId: { get: () => focusKey },
       },
       onEvent(type, fn) {
-        (handlers[type] ??= []).push(fn)
         listeners[type].push(fn)
         return () => { }
       },
@@ -45,35 +49,51 @@ function loadPlugin(focusKey = 's1') {
     let pendingEffects = []
     const useEffect = (fn) => { pendingEffects.push(fn) }
     const flushEffects = () => { pendingEffects.forEach(f => f()); pendingEffects = [] }
-    const plugin = new Function('host', 'useValue', 'jsx', 'atom', 'useEffect', 'flushEffects', body)(host, useValue, jsx, atom, useEffect, flushEffects)
+
+    // --- host-faithful i18n -------------------------------------------------
+    const isRecord = v => typeof v === 'object' && v !== null && !Array.isArray(v)
+    const walk = (tree, key) => key.split('.').reduce((cur, part) => (isRecord(cur) ? cur[part] : undefined), tree)
+    const render = (value, args) =>
+      typeof value === 'string' ? value : typeof value === 'function' ? value(...args) : null
+    const bundles = {}
+    const translate = (key, ...args) => {
+      const active = render(walk(bundles[locale], key), args)
+      if (active !== null) return active
+      if (locale !== 'en') {
+        const fallback = render(walk(bundles.en, key), args)
+        if (fallback !== null) return fallback
+      }
+      return key
+    }
+
+    const plugin = new Function(
+      'host', 'useValue', 'jsx', 'atom', 'useEffect', 'flushEffects', 'usePluginI18n', body
+    )(host, useValue, jsx, atom, useEffect, flushEffects, () => translate)
 
     const contributions = []
     plugin.register({
       register: c => contributions.push(c),
       i18n: {
-        register: () => { },
-        t: (key, ...args) => {
-          const s = key.startsWith('tip.') || key.startsWith('label.')
-            ? { 'label.total': 'Total', 'label.turn': 'Turn', 'label.last': 'Last', 'label.ctx': 'Context', 'label.cache': 'Cache', 'tip.idle': 'No usage reported yet for the focused session.', 'tip.legend': 'legend', 'tip.cache': 'Cache hit: {0}%', 'tip.ctx': 'Context used: {0}%', 'tip.model': 'Model: {0}', 'tip.total': 'Total: {0} (input {1} / output {2})', 'tip.turn': 'This turn: {0}', 'tip.last': 'Last turn: {0}' }[key] ?? key
-            : key
-          return s.replace(/\{(\d)\}/g, (m, i) => String(args[+i] ?? m))
-        },
+        register: (registered) => { Object.assign(bundles, registered); return () => { } },
+        t: translate,
+        onLocaleChange: () => () => { },
+        registerAppLocale: () => () => { },
       },
     })
 
     const fire = (type, payload, sid = focusKey) => listeners[type].forEach(fn => fn({ session_id: sid, payload }))
-    const render = () => { const el = contributions[0].render(); flushEffects(); return el }
-    render() // mount: register event handlers (React runs effects after first paint)
+    const renderItem = () => { const el = contributions[0].render(); flushEffects(); return el }
+    renderItem() // mount: register event handlers (React runs effects after first paint)
+
     return {
+      bundles,
       contributions,
-      fire,
       ticker: (usage, sid = focusKey) => fire('session.usage', { usage }, sid),
       start: (sid = focusKey) => fire('message.start', {}, sid),
       complete: (usage, sid = focusKey) => fire('message.complete', usage ? { usage } : {}, sid),
-      render,
+      render: renderItem,
     }
   })
-  return source
 }
 
 const digits = value => String(value).replace(/\D/g, '')
@@ -86,10 +106,47 @@ test('registers one right-aligned status bar item', async () => {
   assert.equal(contributions[0].order, 135)
 })
 
+test('locale bundles are NESTED trees, not flat dotted keys', async () => {
+  const { bundles } = await loadPlugin()
+  for (const locale of ['en', 'zh']) {
+    assert.ok(bundles[locale], `missing ${locale} bundle`)
+    const dotted = Object.keys(bundles[locale]).filter(k => k.includes('.'))
+    assert.deepEqual(dotted, [], `${locale} bundle has flat dotted keys the host cannot resolve: ${dotted}`)
+    assert.equal(typeof bundles[locale].label.total, 'string')
+    assert.equal(typeof bundles[locale].tip.idle, 'string')
+    // Interpolated messages must be functions: the host returns plain strings
+    // verbatim, so a `{0}` template would surface as literal braces.
+    assert.equal(typeof bundles[locale].tip.total, 'function')
+  }
+  // Same leaf set in both locales — a missing zh key silently falls back to English.
+  const leaves = (tree, prefix = '') =>
+    Object.entries(tree).flatMap(([k, v]) =>
+      typeof v === 'object' ? leaves(v, `${prefix}${k}.`) : [`${prefix}${k}`]).sort()
+  assert.deepEqual(leaves(bundles.zh), leaves(bundles.en))
+})
+
 test('renders an idle placeholder before any usage', async () => {
   const item = await loadPlugin()
   const { props } = item.render()
   assert.equal(props.children, 'Total —')
+})
+
+test('follows the app locale: zh labels and tooltip, no raw keys', async () => {
+  const item = await loadPlugin({ locale: 'zh' })
+  item.start()
+  item.ticker({ input: 1000, output: 50, total: 1050, context_percent: 12, cache_hit_pct: 80 })
+
+  const { props } = item.render()
+  assert.ok(String(props.children).startsWith('总量'), props.children)
+  assert.ok(String(props.children).includes('本轮'), props.children)
+  assert.ok(String(props.children).includes('上下文'), props.children)
+  assert.ok(!/[a-z]+\.[a-z]+/.test(String(props.children)), 'raw i18n key leaked: ' + props.children)
+
+  const title = String(props.title)
+  assert.ok(title.includes('总量：累计'), title)
+  assert.ok(title.includes('模型') || !title.includes('Model:'), title)
+  assert.ok(!title.includes('{0}'), 'uninterpolated placeholder: ' + title)
+  assert.ok(!/tip\.[a-z]+/.test(title), 'raw i18n key leaked: ' + title)
 })
 
 test('live turn counter grows with the ticker, not equal to total', async () => {
@@ -136,7 +193,7 @@ test('tooltip spells exact figures', async () => {
 })
 
 test('per-session isolation: another session does not clobber focus', async () => {
-  const item = await loadPlugin('s1')
+  const item = await loadPlugin()
   item.start('s1')
   item.ticker({ input: 100, output: 10, total: 110 }, 's1')
   // another session ticks; focused s1 must be untouched.

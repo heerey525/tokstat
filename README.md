@@ -3,6 +3,8 @@
 A Hermes Desktop plugin: live token usage for the focused session, pinned to the
 right of the status bar.
 
+Language: **English** · [中文](README.zh.md)
+
 ```
 Total 1.1M · Turn 32K · Last 31K · Context 97% · Cache 56%
 ```
@@ -70,4 +72,25 @@ node --test tests/plugin.test.mjs
 ```
 
 Tests import the real `desktop/plugin.js` with stubbed SDK (the official
-single-file desktop-plugin test pattern); no build step.
+single-file desktop-plugin test pattern); no build step. The `usePluginI18n`
+stub mirrors the HOST (dotted-path walk over the registered bundle, `en`
+fallback, then the key) instead of returning friendly strings — that is what
+keeps the two i18n rules below honest.
+
+## i18n contract (learned the hard way)
+
+`ctx.i18n.register` / `usePluginI18n` follow the host's catalog rules, and two
+of them bite silently:
+
+1. **Bundles must be nested trees.** A key is resolved by walking the tree on
+   `.`, so a flat `'label.total': '总量'` entry is never found — the lookup
+   returns the raw key, in every locale. Write `label: { total: '总量' }` and
+   keep calling `t('label.total')`.
+2. **Interpolated messages must be functions.** A plain string is returned
+   verbatim; `{0}` / `{1}` are *not* substituted (that convenience exists only
+   for app-level language packs registered through `registerAppLocale`). Use
+   `total: (n, i, o) => \`总量：累计 ${n}…\``.
+
+The component translates through `usePluginI18n('tokstat')`, not `ctx.i18n.t`:
+the latter samples the locale but never re-renders, so a live language switch
+would leave the chip stranded in the old language until the next usage event.

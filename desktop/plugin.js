@@ -1,4 +1,4 @@
-import { host, useValue, atom } from '@hermes/plugin-sdk'
+import { host, usePluginI18n, useValue, atom } from '@hermes/plugin-sdk'
 import { jsx } from 'react/jsx-runtime'
 import { useEffect } from 'react'
 
@@ -13,41 +13,41 @@ function fmtExact(v) { return v === null ? '-' : exact.format(v) }
 function fmtCompact(v) { return v === null ? '-' : compact.format(v) }
 
 // ---------------------------------------------------------------------------
-// i18n — English is the registered default; a `zh` bundle is registered too
-// and `ctx.i18n.t` resolves it when the app's active locale is zh.
-// String values with positional {0}/{1}... placeholders are interpolated by
-// the SDK with the args passed to `t(key, ...args)`.
+// i18n — two host rules this bundle has to obey:
+//  1. Bundles MUST be nested trees. The host resolves a key by walking the
+//     tree on '.', so a flat `'label.total': '…'` entry is unreachable: the
+//     lookup asks for messages.label.total, finds nothing in ANY locale, and
+//     returns the raw key. Call sites keep using the dotted path.
+//  2. Interpolated messages MUST be functions. A plain string is returned
+//     verbatim — `{0}` is NOT substituted (that convenience exists only for
+//     app-level language packs, not plugin bundles).
 // ---------------------------------------------------------------------------
 const STRINGS = {
   en: {
-    'label.total': 'Total',
-    'label.turn': 'Turn',
-    'label.last': 'Last',
-    'label.ctx': 'Context',
-    'label.cache': 'Cache',
-    'tip.total': String.raw`Total: {0} (input {1} / output {2})`,
-    'tip.turn': String.raw`This turn (running): {0} (input {1} / output {2})`,
-    'tip.last': String.raw`Last turn: {0} (input {1} / output {2})`,
-    'tip.cache': String.raw`Cache hit: {0}% (higher means cheaper)`,
-    'tip.ctx': String.raw`Context used: {0}%`,
-    'tip.model': String.raw`Model: {0}`,
-    'tip.legend': '"Turn" counts the reply currently generating; "Last" is the previous one.',
-    'tip.idle': 'No usage reported yet for the focused session.',
+    label: { total: 'Total', turn: 'Turn', last: 'Last', ctx: 'Context', cache: 'Cache' },
+    tip: {
+      total: (total, input, output) => `Total: ${total} (input ${input} / output ${output})`,
+      turn: (total, input, output) => `This turn (running): ${total} (input ${input} / output ${output})`,
+      last: (total, input, output) => `Last turn: ${total} (input ${input} / output ${output})`,
+      cache: pct => `Cache hit: ${pct}% (higher means cheaper)`,
+      ctx: pct => `Context used: ${pct}%`,
+      model: name => `Model: ${name}`,
+      legend: '"Turn" counts the reply currently generating; "Last" is the previous one.',
+      idle: 'No usage reported yet for the focused session.',
+    },
   },
   zh: {
-    'label.total': '总量',
-    'label.turn': '本轮',
-    'label.last': '上轮',
-    'label.ctx': '上下文',
-    'label.cache': '缓存',
-    'tip.total': String.raw`总量：累计 {0}（输入 {1} / 输出 {2}）`,
-    'tip.turn': String.raw`本轮（进行中）：{0}（输入 {1} / 输出 {2}）`,
-    'tip.last': String.raw`上轮：{0}（输入 {1} / 输出 {2}）`,
-    'tip.cache': String.raw`缓存命中：{0}%（命中越多越省钱）`,
-    'tip.ctx': String.raw`上下文占用：{0}%`,
-    'tip.model': String.raw`模型：{0}`,
-    'tip.legend': '「本轮」= 正在生成的这一回；「上轮」= 上一个回答',
-    'tip.idle': '聚焦会话还没有上报用量。',
+    label: { total: '总量', turn: '本轮', last: '上轮', ctx: '上下文', cache: '缓存' },
+    tip: {
+      total: (total, input, output) => `总量：累计 ${total}（输入 ${input} / 输出 ${output}）`,
+      turn: (total, input, output) => `本轮（进行中）：${total}（输入 ${input} / 输出 ${output}）`,
+      last: (total, input, output) => `上轮：${total}（输入 ${input} / 输出 ${output}）`,
+      cache: pct => `缓存命中：${pct}%（命中越多越省钱）`,
+      ctx: pct => `上下文占用：${pct}%`,
+      model: name => `模型：${name}`,
+      legend: '「本轮」= 正在生成的这一回；「上轮」= 上一个回答',
+      idle: '聚焦会话还没有上报用量。',
+    },
   },
 }
 
@@ -217,8 +217,10 @@ function onMessageComplete(ev) {
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
-function TokenStat(props) {
-  const t = props.t
+function TokenStat() {
+  // Reactive translator: re-renders on a locale switch AND on a late bundle
+  // registration. `ctx.i18n.t` would sample the locale but never re-render.
+  const t = usePluginI18n('tokstat')
   const ts = useValue(turnState)
   const focusedRt = useValue(host.state.focusedSessionId)
   const focusedSt = useValue(host.state.focusedStoredSessionId)
@@ -301,16 +303,12 @@ const plugin = {
   name: 'Token Stat',
   description: 'Session token usage in the Hermes Desktop status bar: cumulative total, live per-turn counter, last turn, context and cache — English and Chinese.',
   register(ctx) {
-    ctx.i18n?.register?.(STRINGS)
-    const t = ctx.i18n?.t ?? ((key, ...args) => {
-      const s = STRINGS.en[key] ?? key
-      return s.replace(/\{(\d)\}/g, (m, i) => String(args[+i] ?? m))
-    })
+    ctx.i18n.register(STRINGS)
     ctx.register({
       id: 'tokstat',
       area: 'statusBar.right',
       order: 135,
-      render: () => jsx(TokenStat, { t }),
+      render: () => jsx(TokenStat, {}),
     })
   },
 }
