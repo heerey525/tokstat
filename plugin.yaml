@@ -1,5 +1,5 @@
 name: tokstat
-version: "1.0.0"
+version: "1.0.1"
 description: "Cumulative and per-turn token usage, context occupancy, and prompt-cache hit rate in the Hermes Desktop status bar — live while a turn is generating. English and Chinese (follows the app locale)."
 author: heerey525
 kind: standalone
